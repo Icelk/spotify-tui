@@ -1804,7 +1804,22 @@ fn draw_table<B>(
             track_playing_index.and_then(|idx| idx.checked_sub(offset))
           {
             if i == track_playing_offset_index {
-              formatted_row[title_idx] = format!("▶ {}", &formatted_row[title_idx]);
+              if let Some(idx) = formatted_row[title_idx]
+                .as_bytes()
+                .iter()
+                .position(|b| *b == b'\x1b')
+              {
+                let start_idx = formatted_row[title_idx][idx..].find(' ').unwrap_or(0) + idx;
+                if let Some(pos) =
+                  formatted_row[title_idx][start_idx..].find(|c: char| !c.is_ascii_whitespace())
+                {
+                  formatted_row[title_idx].insert_str(pos + start_idx, "▶ ")
+                } else {
+                  formatted_row[title_idx].insert_str(0, "▶ ");
+                }
+              } else {
+                formatted_row[title_idx].insert_str(0, "▶ ");
+              }
               style = Style::default()
                 .fg(app.user_config.theme.active)
                 .add_modifier(Modifier::BOLD);
