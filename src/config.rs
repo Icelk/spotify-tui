@@ -12,6 +12,7 @@ const FILE_NAME: &str = "client.yml";
 const CONFIG_DIR: &str = ".config";
 const APP_CONFIG_DIR: &str = "spotify-tui";
 const TOKEN_CACHE_FILE: &str = ".spotify_token_cache.json";
+const IMAGE_CACHE_FILE: &str = ".spotify_album_cover_cache.bin";
 
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClientConfig {
@@ -25,6 +26,7 @@ pub struct ClientConfig {
 pub struct ConfigPaths {
   pub config_file_path: PathBuf,
   pub token_cache_path: PathBuf,
+  pub image_cache_path: PathBuf,
 }
 
 impl ClientConfig {
@@ -62,10 +64,12 @@ impl ClientConfig {
 
         let config_file_path = &app_config_dir.join(FILE_NAME);
         let token_cache_path = &app_config_dir.join(TOKEN_CACHE_FILE);
+        let image_cache_path = &app_config_dir.join(IMAGE_CACHE_FILE);
 
         let paths = ConfigPaths {
           config_file_path: config_file_path.to_path_buf(),
           token_cache_path: token_cache_path.to_path_buf(),
+          image_cache_path: image_cache_path.to_path_buf(),
         };
 
         Ok(paths)
@@ -88,7 +92,7 @@ impl ClientConfig {
     Ok(())
   }
 
-  pub fn load_config(&mut self) -> Result<()> {
+  pub fn load_config(&mut self) -> Result<ConfigPaths> {
     let paths = self.get_or_build_paths()?;
     if paths.config_file_path.exists() {
       let config_string = fs::read_to_string(&paths.config_file_path)?;
@@ -99,7 +103,7 @@ impl ClientConfig {
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
 
-      Ok(())
+      Ok(paths)
     } else {
       println!("{}", BANNER);
 
@@ -152,7 +156,7 @@ impl ClientConfig {
       self.device_id = config_yml.device_id;
       self.port = config_yml.port;
 
-      Ok(())
+      Ok(paths)
     }
   }
 

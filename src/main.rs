@@ -33,6 +33,7 @@ use rspotify::{
   oauth2::{SpotifyOAuth, TokenInfo},
   util::{process_token, request_token},
 };
+use std::collections::HashMap;
 use std::{
   cmp::{max, min},
   io::{self, stdout},
@@ -204,16 +205,14 @@ of the app. Beware that this comes at a CPU cost!",
   }
 
   let mut client_config = ClientConfig::new();
-  client_config.load_config()?;
-
-  let config_paths = client_config.get_or_build_paths()?;
+  let config_paths = client_config.load_config()?;
 
   // Start authorization with spotify
   let mut oauth = SpotifyOAuth::default()
     .client_id(&client_config.client_id)
     .client_secret(&client_config.client_secret)
     .redirect_uri(&client_config.get_redirect_uri())
-    .cache_path(config_paths.token_cache_path)
+    .cache_path(config_paths.token_cache_path.clone())
     .scope(&SCOPES.join(" "))
     .build();
 
@@ -235,7 +234,14 @@ of the app. Beware that this comes at a CPU cost!",
       if let Some(cmd) = matches.subcommand_name() {
         // Save, because we checked if the subcommand is present at runtime
         let m = matches.subcommand_matches(cmd).unwrap();
-        let network = Network::new(oauth, spotify, client_config, &app);
+        let network = Network::new(
+          oauth,
+          spotify,
+          client_config,
+          &app,
+          HashMap::new(),
+          config_paths.image_cache_path,
+        );
         println!(
           "{}",
           cli::handle_matches(m, cmd.to_string(), network, user_config).await?
@@ -244,7 +250,25 @@ of the app. Beware that this comes at a CPU cost!",
       } else {
         let cloned_app = Arc::clone(&app);
         std::thread::spawn(move || {
-          let mut network = Network::new(oauth, spotify, client_config, &app);
+          let image_cache = std::fs::read(&config_paths.image_cache_path);
+          let image_storage: HashMap<String, (Vec<u8>, SystemTime, String)> = image_cache
+            .map_or(None, |b| {
+              bincode::decode_from_slice(&b, bincode::config::standard())
+                .ok()
+                .map(|(c, _)| c)
+            })
+            .unwrap_or_default();
+          // for (_, _, name) in image_storage.values() {
+          // eprintln!("Loaded album cover for {name:?}");
+          // }
+          let mut network = Network::new(
+            oauth,
+            spotify,
+            client_config,
+            &app,
+            image_storage,
+            config_paths.image_cache_path,
+          );
           start_tokio(sync_io_rx, &mut network);
         });
         // The UI must run in the "main" thread
@@ -298,15 +322,26 @@ async fn start_ui(user_config: UserConfig, app: &Arc<Mutex<App>>) -> Result<()> 
         app.size = size;
 
         // Based on the size of the terminal, adjust the search limit.
-        let potential_limit = max((app.size.height as i32) - 13, 0) as u32;
-        let max_limit = min(potential_limit, 50);
-        let large_search_limit = min((f32::from(size.height) / 1.4) as u32, max_limit);
+        let potential_limit = max((size.height as i32) - 15, 0) as u32;
+        let max_limit = min(potential_limit, 200);
+        let large_search_limit = max_limit;
         let small_search_limit = min((f32::from(size.height) / 2.85) as u32, max_limit / 2);
 
         app.dispatch(IoEvent::UpdateSearchLimits(
           large_search_limit,
           small_search_limit,
         ));
+
+        // update playlist view (images are unloaded & removed on terminal resize)
+        if let (Some(playlists), Some(selected_playlist_index)) =
+          (&app.playlists, &app.selected_playlist_index)
+        {
+          if let Some(selected_playlist) = playlists.items.get(selected_playlist_index.to_owned()) {
+            let playlist_id = selected_playlist.id.to_owned();
+            let offset = app.playlist_offset;
+            app.dispatch(IoEvent::GetPlaylistTracks(playlist_id, offset));
+          }
+        }
 
         // Based on the size of the terminal, adjust how many lines are
         // displayed in the help menu

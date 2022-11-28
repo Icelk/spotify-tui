@@ -77,6 +77,7 @@ pub fn draw_help_menu<B>(f: &mut Frame<B>, app: &App)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([Constraint::Percentage(100)].as_ref())
@@ -365,6 +366,7 @@ pub fn draw_search_results<B>(f: &mut Frame<B>, app: &App, layout_chunk: Rect)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints(
@@ -1061,6 +1063,7 @@ pub fn draw_error_screen<B>(f: &mut Frame<B>, app: &App)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([Constraint::Percentage(100)].as_ref())
@@ -1122,6 +1125,7 @@ fn draw_home<B>(f: &mut Frame<B>, app: &App, layout_chunk: Rect)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([Constraint::Length(7), Constraint::Length(93)].as_ref())
@@ -1287,6 +1291,7 @@ pub fn draw_device_list<B>(f: &mut Frame<B>, app: &App)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([Constraint::Percentage(20), Constraint::Percentage(80)].as_ref())
@@ -1760,6 +1765,9 @@ fn draw_table<B>(
 ) where
   B: Backend,
 {
+  if table_layout.0 != "Songs" {
+    print!("\x1b_Ga=d,d=a;\x1b\\");
+  }
   let selected_style =
     get_color(highlight_state, app.user_config.theme).add_modifier(Modifier::BOLD);
 

@@ -24,6 +24,8 @@ use rspotify::{
   util::get_token,
 };
 use serde_json::{map::Map, Value};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::{
   sync::Arc,
   time::{Duration, Instant, SystemTime},
@@ -121,6 +123,10 @@ pub struct Network<'a> {
   small_search_limit: u32,
   pub client_config: ClientConfig,
   pub app: &'a Arc<Mutex<App>>,
+
+  image_storage: HashMap<String, (Vec<u8>, SystemTime, String)>,
+  image_cache_path: PathBuf,
+  loaded_images: HashSet<String>,
 }
 
 impl<'a> Network<'a> {
@@ -129,6 +135,8 @@ impl<'a> Network<'a> {
     spotify: Spotify,
     client_config: ClientConfig,
     app: &'a Arc<Mutex<App>>,
+    image_storage: HashMap<String, (Vec<u8>, SystemTime, String)>,
+    image_cache_path: PathBuf,
   ) -> Self {
     Network {
       oauth,
@@ -137,6 +145,9 @@ impl<'a> Network<'a> {
       small_search_limit: 4,
       client_config,
       app,
+      image_storage,
+      image_cache_path,
+      loaded_images: HashSet::new(),
     }
   }
 
@@ -179,6 +190,7 @@ impl<'a> Network<'a> {
         self.start_playback(context_uri, uris, offset).await;
       }
       IoEvent::UpdateSearchLimits(large_search_limit, small_search_limit) => {
+        self.loaded_images.clear();
         self.large_search_limit = large_search_limit;
         self.small_search_limit = small_search_limit;
       }
@@ -378,47 +390,216 @@ impl<'a> Network<'a> {
   }
 
   async fn current_user_saved_tracks_contains(&mut self, ids: Vec<String>) {
-    match self.spotify.current_user_saved_tracks_contains(&ids).await {
-      Ok(is_saved_vec) => {
-        let mut app = self.app.lock().await;
-        for (i, id) in ids.iter().enumerate() {
-          if let Some(is_liked) = is_saved_vec.get(i) {
-            if *is_liked {
-              app.liked_song_ids_set.insert(id.to_string());
-            } else {
-              // The song is not liked, so check if it should be removed
-              if app.liked_song_ids_set.contains(id) {
-                app.liked_song_ids_set.remove(id);
-              }
-            }
-          };
+    let mut saved_vec = vec![];
+    for ids in ids.chunks(50) {
+      match self.spotify.current_user_saved_tracks_contains(ids).await {
+        Ok(is_saved_vec) => {
+          saved_vec.extend(is_saved_vec.into_iter());
+        }
+        Err(e) => {
+          self.handle_error(anyhow!(e)).await;
         }
       }
-      Err(e) => {
-        self.handle_error(anyhow!(e)).await;
-      }
+    }
+    let mut app = self.app.lock().await;
+    for (i, id) in ids.iter().enumerate() {
+      if let Some(is_liked) = saved_vec.get(i) {
+        if *is_liked {
+          app.liked_song_ids_set.insert(id.to_string());
+        } else {
+          // The song is not liked, so check if it should be removed
+          if app.liked_song_ids_set.contains(id) {
+            app.liked_song_ids_set.remove(id);
+          }
+        }
+      };
     }
   }
 
-  async fn get_playlist_tracks(&mut self, playlist_id: String, playlist_offset: u32) {
-    if let Ok(playlist_tracks) = self
+  async fn get_playlist_tracks(&mut self, playlist_id: String, mut playlist_offset: u32) {
+    let mut index = self.large_search_limit;
+    // `TODO`: make the calls parallel
+    if let Ok(mut playlist_tracks) = self
       .spotify
       .user_playlist_tracks(
         "spotify",
         &playlist_id,
         None,
-        Some(self.large_search_limit),
+        Some(index.min(50)),
         Some(playlist_offset),
         None,
       )
       .await
     {
+      index = index.saturating_sub(50);
+      playlist_offset += 50;
+      while index != 0 {
+        if let Ok(more_tracks) = self
+          .spotify
+          .user_playlist_tracks(
+            "spotify",
+            &playlist_id,
+            None,
+            Some(index.min(50)),
+            Some(playlist_offset),
+            None,
+          )
+          .await
+        {
+          playlist_tracks.limit += 50;
+          playlist_tracks.total += more_tracks.items.len() as u32;
+          playlist_tracks.items.extend(more_tracks.items.into_iter());
+        } else {
+          break;
+        }
+        index = index.saturating_sub(50);
+      }
+
+      let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+      // those we are currently fetching
+      let mut set = HashSet::new();
+      for track in &playlist_tracks.items {
+        if let Some(track) = &track.track {
+          if let (Some(image), Some(id)) = (track.album.images.last(), &track.album.id) {
+            if set.contains(id) {
+              continue;
+            }
+            if let Some((_, creation, _name)) = self.image_storage.get(id) {
+              // 7-day cache
+              if creation
+                .elapsed()
+                .map_or(false, |d| d < Duration::from_secs(60 * 60 * 24 * 7))
+              {
+                continue;
+              }
+            }
+            set.insert(id.clone());
+
+            let url = image.url.clone();
+            let id = id.clone();
+            // eprintln!("Saving image for {:?}", track.album.name);
+            let name = track.album.name.clone();
+            let mut tx = tx.clone();
+            tokio::spawn(async move {
+              if let Ok(response) = reqwest::get(&url).await {
+                if let Ok(body) = response.bytes().await {
+                  if let Ok(decoder) =
+                    image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(body))
+                  {
+                    use image::{ImageDecoder, ImageEncoder};
+                    let mut bytes = vec![0; decoder.total_bytes() as usize];
+                    let dimensions = decoder.dimensions();
+                    let color_type = decoder.color_type();
+                    if decoder.read_image(&mut bytes).is_ok() {
+                      if let Some(img) =
+                        image::RgbImage::from_raw(dimensions.0, dimensions.1, bytes)
+                      {
+                        const SIZE: u32 = 48;
+                        let img =
+                          image::imageops::resize(&img, SIZE, SIZE, image::imageops::Lanczos3);
+                        let mut out = vec![];
+                        let encoder = image::codecs::png::PngEncoder::new(&mut out);
+                        if encoder
+                          .write_image(img.as_raw(), SIZE, SIZE, color_type)
+                          .is_ok()
+                        {
+                          tx.send((out, id, name)).await.unwrap();
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              drop(tx);
+            });
+          }
+        }
+      }
+      drop(set);
+      drop(tx);
+
+      let now = SystemTime::now();
+      while let Some((image, id, name)) = rx.recv().await {
+        self.image_storage.insert(id, (image, now, name));
+      }
+
+      let mut new_loaded = HashSet::new();
+      let mut every_other = false;
+      for track in playlist_tracks.items.iter_mut() {
+        if let Some(album_id) = track.track.as_ref().and_then(|t| t.album.id.as_ref()) {
+          if let Some((image, _download_date, _name)) = self.image_storage.get(album_id) {
+            let mut id_hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hasher::write(&mut id_hasher, album_id.as_bytes());
+            let kitty_id = std::hash::Hasher::finish(&id_hasher);
+            let mut bytes = [0; 2];
+            bytes.copy_from_slice(&kitty_id.to_ne_bytes()[..2]);
+            let kitty_id = u16::from_ne_bytes(bytes) + 1;
+            let kitty_id = kitty_id.to_string();
+            let placement_id = rand::random::<u16>() as u32 + 1;
+
+            new_loaded.insert(album_id.clone());
+            if !self.loaded_images.contains(album_id) {
+              // eprintln!("load {_name} ({album_id}), ");
+              self.loaded_images.insert(album_id.clone());
+              let mut image_string = String::with_capacity(image.len() * 5 / 3);
+              let s = base64::encode(image);
+              let iter = s.as_bytes().chunks(4096);
+              let max = iter.len();
+              for (pos, chunk) in iter.enumerate() {
+                if pos == 0 && max > 1 {
+                  image_string.push_str("\x1b_Gf=100,i=");
+                  image_string.push_str(&kitty_id);
+                  image_string.push_str(",m=1,q=2;")
+                } else if pos == 0 {
+                  image_string.push_str("\x1b_Gf=100,i=");
+                  image_string.push_str(&kitty_id);
+                  image_string.push_str(",m=0,q=2;")
+                } else if pos + 1 == max {
+                  image_string.push_str("\x1b_Gm=0;")
+                } else {
+                  image_string.push_str("\x1b_Gm=1;")
+                }
+
+                image_string.push_str(std::str::from_utf8(chunk).unwrap());
+                image_string.push_str("\x1b\\");
+              }
+              print!("{image_string}");
+            }
+
+            let icon_string = if every_other {
+              format!("\x1b_Ga=p,i={kitty_id},p={placement_id},c=4,r=2,q=2,C=1;\x1b\\        ")
+            } else {
+              format!("    \x1b_Ga=p,i={kitty_id},p={placement_id},c=4,r=2,q=2,C=1;\x1b\\    ")
+            };
+            track
+              .track
+              .as_mut()
+              .unwrap()
+              .name
+              .insert_str(0, &icon_string);
+            every_other = !every_other;
+          }
+        }
+      }
+
+      // comment out to risk overloading kitty with images and getting garbage output
+      // self.loaded_images = new_loaded;
+      print!("\x1b_Ga=d,d=a;\x1b\\");
       self.set_playlist_tracks_to_table(&playlist_tracks).await;
 
       let mut app = self.app.lock().await;
       app.playlist_tracks = Some(playlist_tracks);
       app.push_navigation_stack(RouteId::TrackTable, ActiveBlock::TrackTable);
-    };
+
+      let image_cache =
+        bincode::encode_to_vec(&self.image_storage, bincode::config::standard()).unwrap();
+      if let Some(parent) = self.image_cache_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+      }
+      if let Err(err) = tokio::fs::write(&self.image_cache_path, &image_cache).await {
+        eprintln!("Got an error when writing image cache: {err:?}");
+      }
+    }
   }
 
   async fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistTrack>) {
@@ -426,9 +607,8 @@ impl<'a> Network<'a> {
       .set_tracks_to_table(
         playlist_track_page
           .items
-          .clone()
-          .into_iter()
-          .filter_map(|item| item.track)
+          .iter()
+          .filter_map(|item| item.track.clone())
           .collect::<Vec<FullTrack>>(),
       )
       .await;
@@ -463,7 +643,7 @@ impl<'a> Network<'a> {
         "spotify",
         &playlist_id,
         None,
-        Some(self.large_search_limit),
+        Some(self.large_search_limit.min(50)),
         Some(made_for_you_offset),
         None,
       )
@@ -484,7 +664,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_shows(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .get_saved_show(self.large_search_limit, offset)
+      .get_saved_show(self.large_search_limit.min(50), offset)
       .await
     {
       Ok(saved_shows) => {
@@ -520,7 +700,7 @@ impl<'a> Network<'a> {
   async fn get_show_episodes(&mut self, show: Box<SimplifiedShow>) {
     match self
       .spotify
-      .get_shows_episodes(show.id.clone(), self.large_search_limit, 0, None)
+      .get_shows_episodes(show.id.clone(), self.large_search_limit.min(50), 0, None)
       .await
     {
       Ok(episodes) => {
@@ -563,7 +743,7 @@ impl<'a> Network<'a> {
   async fn get_current_show_episodes(&mut self, show_id: String, offset: Option<u32>) {
     match self
       .spotify
-      .get_shows_episodes(show_id, self.large_search_limit, offset, None)
+      .get_shows_episodes(show_id, self.large_search_limit.min(50), offset, None)
       .await
     {
       Ok(episodes) => {
@@ -684,7 +864,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_tracks(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .current_user_saved_tracks(self.large_search_limit, offset)
+      .current_user_saved_tracks(self.large_search_limit.min(50), offset)
       .await
     {
       Ok(saved_tracks) => {
@@ -895,7 +1075,7 @@ impl<'a> Network<'a> {
       &artist_id,
       None,
       country,
-      Some(self.large_search_limit),
+      Some(self.large_search_limit.min(50)),
       Some(0),
     );
     let artist_name = if input_artist_name.is_empty() {
@@ -941,7 +1121,7 @@ impl<'a> Network<'a> {
     if let Some(album_id) = &album.id {
       match self
         .spotify
-        .album_track(&album_id.clone(), self.large_search_limit, 0)
+        .album_track(&album_id.clone(), self.large_search_limit.min(50), 0)
         .await
       {
         Ok(tracks) => {
@@ -981,12 +1161,12 @@ impl<'a> Network<'a> {
     match self
       .spotify
       .recommendations(
-        seed_artists,            // artists
-        None,                    // genres
-        seed_tracks,             // tracks
-        self.large_search_limit, // adjust playlist to screen size
-        country,                 // country
-        &empty_payload,          // payload
+        seed_artists,                    // artists
+        None,                            // genres
+        seed_tracks,                     // tracks
+        self.large_search_limit.min(50), // adjust playlist to screen size
+        country,                         // country
+        &empty_payload,                  // payload
       )
       .await
     {
@@ -1098,7 +1278,7 @@ impl<'a> Network<'a> {
   async fn get_followed_artists(&mut self, after: Option<String>) {
     match self
       .spotify
-      .current_user_followed_artists(self.large_search_limit, after)
+      .current_user_followed_artists(self.large_search_limit.min(50), after)
       .await
     {
       Ok(saved_artists) => {
@@ -1128,7 +1308,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_saved_albums(&mut self, offset: Option<u32>) {
     match self
       .spotify
-      .current_user_saved_albums(self.large_search_limit, offset)
+      .current_user_saved_albums(self.large_search_limit.min(50), offset)
       .await
     {
       Ok(saved_albums) => {
@@ -1295,7 +1475,7 @@ impl<'a> Network<'a> {
       .search(
         &search_string,
         SearchType::Playlist,
-        self.large_search_limit,
+        self.large_search_limit.min(50),
         0,
         country,
         None,
@@ -1349,7 +1529,7 @@ impl<'a> Network<'a> {
   async fn get_current_user_playlists(&mut self) {
     let playlists = self
       .spotify
-      .current_user_playlists(self.large_search_limit, None)
+      .current_user_playlists(self.large_search_limit.min(50), None)
       .await;
 
     match playlists {
@@ -1368,7 +1548,7 @@ impl<'a> Network<'a> {
   async fn get_recently_played(&mut self) {
     match self
       .spotify
-      .current_user_recently_played(self.large_search_limit)
+      .current_user_recently_played(self.large_search_limit.min(50))
       .await
     {
       Ok(result) => {

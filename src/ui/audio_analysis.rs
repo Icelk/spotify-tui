@@ -16,6 +16,7 @@ pub fn draw<B>(f: &mut Frame<B>, app: &App)
 where
   B: Backend,
 {
+  print!("\x1b_Ga=d,d=a;\x1b\\");
   let margin = util::get_main_layout_margin(app);
 
   let chunks = Layout::default()
