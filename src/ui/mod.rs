@@ -848,16 +848,16 @@ where
       TableHeaderItem {
         id: ColumnId::Title,
         text: "Title",
-        width: get_percentage_width(layout_chunk.width, 0.3),
+        width: get_percentage_width(layout_chunk.width, 0.45),
       },
       TableHeaderItem {
         text: "Artist",
-        width: get_percentage_width(layout_chunk.width, 0.3),
+        width: get_percentage_width(layout_chunk.width, 0.2),
         ..Default::default()
       },
       TableHeaderItem {
         text: "Album",
-        width: get_percentage_width(layout_chunk.width, 0.3),
+        width: get_percentage_width(layout_chunk.width, 0.25),
         ..Default::default()
       },
       TableHeaderItem {
@@ -879,7 +879,7 @@ where
     .tracks
     .iter()
     .map(|item| TableItem {
-      id: item.id.clone().unwrap_or_else(|| "".to_string()),
+      id: item.id.clone().unwrap_or_default(),
       format: vec![
         "".to_string(),
         item.name.to_owned(),
