@@ -12,6 +12,9 @@
 
 [![Follow Alexander Keliris (Rigellute)](https://img.shields.io/twitter/follow/AlexKeliris?label=Follow%20Alexander%20Keliris%20%28Rigellute%29&style=social)](https://twitter.com/intent/follow?screen_name=AlexKeliris)
 
+> This fork adds support for taller displays (by requesting the playlist contents in multiple API calls)
+> and album covers using the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+
 A Spotify client for the terminal written in Rust.
 
 ![Demo](https://user-images.githubusercontent.com/12150276/75177190-91d4ab00-572d-11ea-80bd-c5e28c7b17ad.gif)
