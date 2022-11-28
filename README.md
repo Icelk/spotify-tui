@@ -15,6 +15,9 @@
 > This fork adds support for taller displays (by requesting the playlist contents in multiple API calls)
 > and album covers using the [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
+> To build, you have to clone [my fork of `tui-rs`](https://github.com/Icelk/tui-rs)
+> to `../tui` (i.e. `git clone https://github.com/Icelk/tui-rs ../tui`)
+
 A Spotify client for the terminal written in Rust.
 
 ![Demo](https://user-images.githubusercontent.com/12150276/75177190-91d4ab00-572d-11ea-80bd-c5e28c7b17ad.gif)
